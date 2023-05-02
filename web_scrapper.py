@@ -1,4 +1,4 @@
-"""_summary_
+"""Module that have all the necesary classes and methods to web scrap some popular colombian grocery stores
 """
 import logging
 import pathlib
@@ -14,14 +14,25 @@ from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.remote.webdriver import WebDriver
 
+from web_scrapper import Product
+
 
 class NoMoreProductsError(Exception):
-    """_summary_
+    """Exception that rises where no more products are identified in a given page
     """
 
 @dataclass(slots=True)
+class Store:
+    """Dataclass that defines a store that can be scrapped
+    """
+
+    store_id: int
+    name: str
+    base_url: str
+
+@dataclass(slots=True)
 class Product:
-    """_summary_
+    """Dataclass that represents a product identified when a store is being scrapped
     """
 
     url: str
@@ -29,45 +40,43 @@ class Product:
     name: str
     price: str
     query_date: datetime
+    seller: Store
 
 class WebScrapper(ABC):
-    """_summary_
+    """Abstract class that defines what a valid web scrapper for a colombian grocery store should implement
     """
 
-    base_url: str
-    site_name: str
+    store: Store
 
     @abstractmethod
     def scrap_site(self) -> list[Product]:
-        """_summary_
+        """Base method that should be invoked to scrap a site
 
         Returns:
-            list[Product]: _description_
+            list[Product]: List of identified products in the site 
         """
 
     @abstractmethod
     def scrap_page(self, page: int, browser: WebDriver) -> list[Product]:
-        """_summary_
+        """Method that scrap a single page of a site based on a page number
 
         Args:
-            page (int): _description_
-            browser (WebDriver): _description_
+            page (int): Number of the page to scrap
+            browser (WebDriver): Browser to use to scrap the page
 
         Raises:
-            NoMoreProductsError: _description_
-            NoMoreProductsError: _description_
+            NoMoreProductsError: Raised when no product was identified in the given page
 
         Returns:
-            list[Product]: _description_
+            list[Product]: List of identified products in the current page
         """
 
 class ExitoScrapper(WebScrapper):
-    """_summary_
+    """Definition of the web scrapper for the exito store
     """
 
     def __init__(self) -> None:
-        self.url = 'https://www.exito.com/mercado/?page={page_number}'
-        self.site_name = 'Exito'
+        self.store = Store(1, 'Exito','https://www.exito.com/mercado/?page={page_number}')
 
     def scrap_site(self) -> list[Product]:
         scrapped_products: list[Product] = list()
@@ -83,15 +92,15 @@ class ExitoScrapper(WebScrapper):
 
     def scrap_page(self, page: int, browser: WebDriver) -> list[Product]:
         scrapped_products: list[Product] = list()
-        browser.get(self.url.format(page_number=page))
+        browser.get(self.store.base_url.format(page_number=page))
         time.sleep(8)
         try:
             close_modal = WebDriverWait(browser, 60).until(
             EC.presence_of_element_located((By.CLASS_NAME, 'exito-geolocation-3-x-cursorPointer')))
             if close_modal:
                 close_modal.click()
-        except:
-            raise NoMoreProductsError()
+        except Exception as ex:
+            raise NoMoreProductsError(ex)
         for scroll_counter in range(8):
             time.sleep(2)
             browser.execute_script(
@@ -118,41 +127,44 @@ class ExitoScrapper(WebScrapper):
             product_identified_url = item.find_element(
                 By.TAG_NAME, 'a').get_attribute('href')
             scrapped_products.append(Product(product_identified_url, product_identified_brand,
-                                             product_identified_name, product_identified_price, datetime.now()))
+                                             product_identified_name, product_identified_price, datetime.now(), self.store))
         return scrapped_products
 
 @dataclass
-class IProductDAO(ABC):
-    """_summary_
+class ProductDAO(ABC):
+    """Class that defines what a valid DAO should implement to store the information of a scrapped product
     """
 
     PRODUCTS_TABLE_NAME: str = 'products'
 
-    def __init__(self):
+    def __init__(self) -> None:
         if not self.check_database():
             self.initialize_database()
     
     @abstractmethod
     def check_database(self) -> bool:
-        """_summary_
+        """Check if the database is initialized correctly. That is, the database and the needed tables exists
 
         Returns:
-            bool: _description_
+            bool: Boolean representing if the database is valid
         """
     
     @abstractmethod
-    def initialize_database(self):
-        """_summary_
+    def initialize_database(self) -> None:
+        """Method that creates the necesary tables for the scrapper to store the results
         """
 
     @abstractmethod
-    def write_products(self, products: list[Product]):
-        """_summary_
+    def write_products(self, products: list[Product]) -> None:
+        """Method that flushes the identified products to the database
+
+        Args:
+            products (list[Product]): List of Product objects to be stores
         """
 
 @dataclass
-class SQLiteProductDAO(IProductDAO):
-    """_summary_
+class SQLiteProductDAO(ProductDAO):
+    """Class that implements the required methods to store the scrapping result into a SQLite DB
     """
 
     DB_FILE_NAME: str = 'web_scrapper.db'
@@ -171,42 +183,32 @@ class SQLiteProductDAO(IProductDAO):
                 return False
         return True
 
-    def initialize_database(self):
+    def initialize_database(self) -> None:
         with sqlite3.connect(self.DB_FILE_NAME) as connection:
             connection.cursor().execute(
-                f'CREATE TABLE {self.PRODUCTS_TABLE_NAME} (url TEXT, brand TEXT, name TEXT, price TEXT, query_date TEXT)')
+                f'CREATE TABLE {self.PRODUCTS_TABLE_NAME} (seller_id INT, url TEXT, brand TEXT, name TEXT, price TEXT, query_date TEXT)')
 
-    def write_products(self, products: list[Product]):
-        """_summary_
-
-        Args:
-            products (list[Product]): _description_
-
-        Returns:
-            bool: _description_
-        """
-
+    def write_products(self, products: list[Product]) -> None:
         with sqlite3.connect(self.DB_FILE_NAME) as connection:
-            connection.cursor().executemany(f'INSERT INTO {self.PRODUCTS_TABLE_NAME} (url, brand, name, price, query_date) VALUES (?,?,?,?,?)',
-                                            tuple(map(lambda pr: (pr.url, pr.brand, pr.name, pr.price, pr.query_date), products)))
+            connection.cursor().executemany(f'INSERT INTO {self.PRODUCTS_TABLE_NAME} (seller_id, url, brand, name, price, query_date) VALUES (?,?,?,?,?,?)',
+                                            tuple(map(lambda pr: (pr.seller.store_id, pr.url, pr.brand, pr.name, pr.price, pr.query_date), products)))
 
 @dataclass
-class PostgreSQLProductDAO(IProductDAO):
-    """_summary_
+class PostgreSQLProductDAO(ProductDAO):
+    """Class that implements the required methods to store the scrapping result into a PostgreSQL Database
     """
 
-    def write_products(self, products: list[Product]):
-        """_summary_
+    def check_database(self) -> bool:
+        return super().check_database()
 
-        Args:
-            products (list[Product]): _description_
+    def initialize_database(self) -> None:
+        return super().initialize_database()
 
-        Returns:
-            bool: _description_
-        """
+    def write_products(self, products: list[Product]) -> None:
+        return super().write_products(products)
 
-def main():
-    """_summary_
+def main() -> None:
+    """Main method that orchestrate an example flow to scrap web pages
     """
 
     logging.basicConfig(level=logging.INFO)
@@ -214,12 +216,12 @@ def main():
     scrapper: WebScrapper = ExitoScrapper()
     products: list[Product] = scrapper.scrap_site()
 
-    products_dao: IProductDAO = SQLiteProductDAO()
+    products_dao: ProductDAO = SQLiteProductDAO()
 
     products_dao.write_products(products)
 
     logging.info(
-        f'Identified {len(products)} products in site "{scrapper.site_name}"')
+        f'Identified {len(products)} products in site "{scrapper.store.name}"')
 
 if __name__ == '__main__':
     main()
